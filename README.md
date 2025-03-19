@@ -72,6 +72,7 @@ As `Keycloak` supports [`PKCE`](https://datatracker.ietf.org/doc/html/rfc7636) (
 In a terminal, navigate to the `springboot-react-keycloak` root folder and run:
 ```
 ./init-environment.sh
+docker start $(docker ps -aq)
 ```
 
 ## Initialize Keycloak
@@ -105,7 +106,8 @@ This script will:
 
   - Run the following `Maven` command to start the application:
     ```
-    ./mvnw clean spring-boot:run -Dspring-boot.run.jvmArguments="-Dserver.port=9080"
+    ./mvnw clean spring-boot:run -Dspring-boot.run.jvmArguments="-Dserver.port=9080" 
+     mvn spring-boot:run
     ```
 
   - We can also configure **Social Identity Providers** such as, `GitHub`, `Google`, `Facebook` and `Instagram`. I've written two articles in **Medium** where I explain step-by-step how to integrate [GitHub](https://medium.com/@ivangfr/integrating-github-as-a-social-identity-provider-in-keycloak-982f521a622f) and [Google](https://medium.com/@ivangfr/integrating-google-as-a-social-identity-provider-in-keycloak-c905577ec499).
