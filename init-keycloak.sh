@@ -1,323 +1,196 @@
-# Verifica se o contêiner do Keycloak está em execução
-if (-not (docker ps --filter "name=keycloak" -q)) {
-    Write-Host "[WARNING] Você deve inicializar o ambiente (./init-environment.sh) antes de inicializar o Keycloak."
-    exit 1
-}
+#!/usr/bin/env bash
 
-# Define a porta do Keycloak (padrão: localhost:8080)
-$KEYCLOAK_HOST_PORT = if ($args[0]) { $args[0] } else { "localhost:8080" }
-Write-Host "KEYCLOAK_HOST_PORT: $KEYCLOAK_HOST_PORT"
+if [[ -z $(docker ps --filter "name=keycloak" -q) ]]; then
+  echo "[WARNING] You must initialize the envionment (./init-environment.sh) before initializing keycloak"
+  exit 1
+fi
 
-# Obtém o token de administrador
-Write-Host "Obtendo token de acesso do administrador..."
-$ADMIN_TOKEN = (Invoke-RestMethod -Uri "http://$KEYCLOAK_HOST_PORT/realms/master/protocol/openid-connect/token" `
-    -Method Post `
-    -Headers @{"Content-Type" = "application/x-www-form-urlencoded"} `
-    -Body @{
-        username = "admin"
-        password = "admin"
-        grant_type = "password"
-        client_id = "admin-cli"
-    }).access_token
+KEYCLOAK_HOST_PORT=${1:-"localhost:8080"}
+echo
+echo "KEYCLOAK_HOST_PORT: $KEYCLOAK_HOST_PORT"
 
-if (-not $ADMIN_TOKEN) {
-    Write-Host "[ERRO] Falha ao obter o token de acesso do administrador."
-    exit 1
-}
-Write-Host "ADMIN_TOKEN=$ADMIN_TOKEN"
+echo
+echo "Getting admin access token"
+echo "--------------------------"
 
-# Cria o realm "company-services"
-Write-Host "Criando o realm 'company-services'..."
-$REALM_RESPONSE = Invoke-RestMethod -Uri "http://$KEYCLOAK_HOST_PORT/admin/realms" `
-    -Method Post `
-    -Headers @{
-        "Authorization" = "Bearer $ADMIN_TOKEN"
-        "Content-Type" = "application/json"
-    } `
-    -Body (@{
-        realm = "company-services"
-        enabled = $true
-        registrationAllowed = $true
-    } | ConvertTo-Json)
+ADMIN_TOKEN=$(curl -s -X POST "http://$KEYCLOAK_HOST_PORT/realms/master/protocol/openid-connect/token" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "username=admin" \
+  -d 'password=admin' \
+  -d 'grant_type=password' \
+  -d 'client_id=admin-cli' | jq -r '.access_token')
 
-if (-not $REALM_RESPONSE) {
-    Write-Host "[ERRO] Falha ao criar o realm 'company-services'."
-    exit 1
-}
-Write-Host "Realm 'company-services' criado com sucesso."
+echo "ADMIN_TOKEN=$ADMIN_TOKEN"
+echo
 
-# Desativa a ação obrigatória "VERIFY_PROFILE"
-Write-Host "Desativando a ação obrigatória 'VERIFY_PROFILE'..."
-$VERIFY_PROFILE_REQUIRED_ACTION = Invoke-RestMethod -Uri "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/authentication/required-actions/VERIFY_PROFILE" `
-    -Headers @{"Authorization" = "Bearer $ADMIN_TOKEN"}
+echo "Creating company-services realm"
+echo "-------------------------------"
 
-if (-not $VERIFY_PROFILE_REQUIRED_ACTION) {
-    Write-Host "[ERRO] Falha ao obter a ação obrigatória 'VERIFY_PROFILE'."
-    exit 1
-}
+curl -i -X POST "http://$KEYCLOAK_HOST_PORT/admin/realms" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"realm": "company-services", "enabled": true, "registrationAllowed": true}'
 
-$VERIFY_PROFILE_REQUIRED_ACTION.enabled = $false
-Invoke-RestMethod -Uri "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/authentication/required-actions/VERIFY_PROFILE" `
-    -Method Put `
-    -Headers @{
-        "Authorization" = "Bearer $ADMIN_TOKEN"
-        "Content-Type" = "application/json"
-    } `
-    -Body ($VERIFY_PROFILE_REQUIRED_ACTION | ConvertTo-Json -Depth 10)
+echo "Getting required action Verify Profile"
+echo "--------------------------------------"
 
-Write-Host "Ação obrigatória 'VERIFY_PROFILE' desativada com sucesso."
+VERIFY_PROFILE_REQUIRED_ACTION=$(curl -s "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/authentication/required-actions/VERIFY_PROFILE" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" | jq)
 
-# Cria o cliente "movies-app"
-Write-Host "Criando o cliente 'movies-app'..."
-$CLIENT_RESPONSE = Invoke-RestMethod -Uri "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/clients" `
-    -Method Post `
-    -Headers @{
-        "Authorization" = "Bearer $ADMIN_TOKEN"
-        "Content-Type" = "application/json"
-    } `
-    -Body (@{
-        clientId = "movies-app"
-        directAccessGrantsEnabled = $true
-        publicClient = $true
-        redirectUris = @("http://localhost:3000/*")
-    } | ConvertTo-Json)
+echo $VERIFY_PROFILE_REQUIRED_ACTION
+echo
 
-if (-not $CLIENT_RESPONSE) {
-    Write-Host "[ERRO] Falha ao criar o cliente 'movies-app'."
-    exit 1
-}
-Write-Host "Cliente 'movies-app' criado com sucesso."
+echo "Disabling required action Verify Profile"
+echo "----------------------------------------"
 
-# Captura o ID do cliente "movies-app"
-$CLIENT_ID = (Invoke-RestMethod -Uri "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/clients" `
-    -Headers @{"Authorization" = "Bearer $ADMIN_TOKEN"} | Where-Object { $_.clientId -eq "movies-app" }).id
+NEW_VERIFY_PROFILE_REQUIRED_ACTION=$(echo "$VERIFY_PROFILE_REQUIRED_ACTION" | jq '.enabled = false')
 
-if (-not $CLIENT_ID) {
-    Write-Host "[ERRO] Falha ao obter o ID do cliente 'movies-app'."
-    exit 1
-}
-Write-Host "CLIENT_ID=$CLIENT_ID"
+echo $NEW_VERIFY_PROFILE_REQUIRED_ACTION
+echo
 
-# Cria o papel "MOVIES_USER"
-Write-Host "Criando o papel 'MOVIES_USER'..."
-Invoke-RestMethod -Uri "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/clients/$CLIENT_ID/roles" `
-    -Method Post `
-    -Headers @{
-        "Authorization" = "Bearer $ADMIN_TOKEN"
-        "Content-Type" = "application/json"
-    } `
-    -Body (@{
-        name = "MOVIES_USER"
-    } | ConvertTo-Json)
+curl -i -X PUT "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/authentication/required-actions/VERIFY_PROFILE" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "$NEW_VERIFY_PROFILE_REQUIRED_ACTION"
 
-# Obtém o ID do papel "MOVIES_USER"
-$MOVIES_USER_CLIENT_ROLE_ID = (Invoke-RestMethod -Uri "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/clients/$CLIENT_ID/roles/MOVIES_USER" `
-    -Headers @{"Authorization" = "Bearer $ADMIN_TOKEN"}).id
+echo "Creating movies-app client"
+echo "--------------------------"
 
-if (-not $MOVIES_USER_CLIENT_ROLE_ID) {
-    Write-Host "[ERRO] Falha ao criar ou obter o papel 'MOVIES_USER'."
-    exit 1
-}
-Write-Host "MOVIES_USER_CLIENT_ROLE_ID=$MOVIES_USER_CLIENT_ROLE_ID"
+CLIENT_ID=$(curl -si -X POST "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/clients" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"clientId": "movies-app", "directAccessGrantsEnabled": true, "publicClient": true, "redirectUris": ["http://localhost:3000/*"]}' \
+  | grep -oE '[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}')
 
-# Cria o papel "MOVIES_ADMIN"
-Write-Host "Criando o papel 'MOVIES_ADMIN'..."
-Invoke-RestMethod -Uri "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/clients/$CLIENT_ID/roles" `
-    -Method Post `
-    -Headers @{
-        "Authorization" = "Bearer $ADMIN_TOKEN"
-        "Content-Type" = "application/json"
-    } `
-    -Body (@{
-        name = "MOVIES_ADMIN"
-    } | ConvertTo-Json)
+echo "CLIENT_ID=$CLIENT_ID"
+echo
 
-# Obtém o ID do papel "MOVIES_ADMIN"
-$MOVIES_ADMIN_CLIENT_ROLE_ID = (Invoke-RestMethod -Uri "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/clients/$CLIENT_ID/roles/MOVIES_ADMIN" `
-    -Headers @{"Authorization" = "Bearer $ADMIN_TOKEN"}).id
+echo "Creating the client role MOVIES_USER for the movies-app client"
+echo "--------------------------------------------------------------"
 
-if (-not $MOVIES_ADMIN_CLIENT_ROLE_ID) {
-    Write-Host "[ERRO] Falha ao criar ou obter o papel 'MOVIES_ADMIN'."
-    exit 1
-}
-Write-Host "MOVIES_ADMIN_CLIENT_ROLE_ID=$MOVIES_ADMIN_CLIENT_ROLE_ID"
+curl -i -X POST "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/clients/$CLIENT_ID/roles" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "MOVIES_USER"}'
 
-# Cria o grupo "USERS"
-Write-Host "Criando o grupo 'USERS'..."
-$USERS_GROUP_ID = (Invoke-RestMethod -Uri "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/groups" `
-    -Method Post `
-    -Headers @{
-        "Authorization" = "Bearer $ADMIN_TOKEN"
-        "Content-Type" = "application/json"
-    } `
-    -Body (@{
-        name = "USERS"
-    } | ConvertTo-Json)).id
+MOVIES_USER_CLIENT_ROLE_ID=$(curl -s http://localhost:8080/admin/realms/company-services/clients/$CLIENT_ID/roles/MOVIES_USER \
+  -H "Authorization: Bearer $ADMIN_TOKEN" | jq -r '.id')
 
-if (-not $USERS_GROUP_ID) {
-    Write-Host "[ERRO] Falha ao criar o grupo 'USERS'."
-    exit 1
-}
-Write-Host "USERS_GROUP_ID=$USERS_GROUP_ID"
+echo "MOVIES_USER_CLIENT_ROLE_ID=$MOVIES_USER_CLIENT_ROLE_ID"
+echo
 
-# Cria o grupo "ADMINS"
-Write-Host "Criando o grupo 'ADMINS'..."
-$ADMINS_GROUP_ID = (Invoke-RestMethod -Uri "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/groups" `
-    -Method Post `
-    -Headers @{
-        "Authorization" = "Bearer $ADMIN_TOKEN"
-        "Content-Type" = "application/json"
-    } `
-    -Body (@{
-        name = "ADMINS"
-    } | ConvertTo-Json)).id
+echo "Creating the client role MOVIES_ADMIN for the movies-app client"
+echo "---------------------------------------------------------------"
 
-if (-not $ADMINS_GROUP_ID) {
-    Write-Host "[ERRO] Falha ao criar o grupo 'ADMINS'."
-    exit 1
-}
-Write-Host "ADMINS_GROUP_ID=$ADMINS_GROUP_ID"
+curl -i -X POST "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/clients/$CLIENT_ID/roles" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "MOVIES_ADMIN"}'
 
-# Define o grupo "USERS" como grupo padrão do realm
-Write-Host "Definindo o grupo 'USERS' como grupo padrão do realm..."
-Invoke-RestMethod -Uri "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/default-groups/$USERS_GROUP_ID" `
-    -Method Put `
-    -Headers @{"Authorization" = "Bearer $ADMIN_TOKEN"}
+MOVIES_ADMIN_CLIENT_ROLE_ID=$(curl -s http://localhost:8080/admin/realms/company-services/clients/$CLIENT_ID/roles/MOVIES_ADMIN \
+  -H "Authorization: Bearer $ADMIN_TOKEN" | jq -r '.id')
 
-Write-Host "Grupo 'USERS' definido como padrão do realm."
+echo "MOVIES_ADMIN_CLIENT_ROLE_ID=$MOVIES_ADMIN_CLIENT_ROLE_ID"
+echo
 
-# Atribui o papel "MOVIES_USER" ao grupo "USERS"
-Write-Host "Atribuindo o papel 'MOVIES_USER' ao grupo 'USERS'..."
-Invoke-RestMethod -Uri "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/groups/$USERS_GROUP_ID/role-mappings/clients/$CLIENT_ID" `
-    -Method Post `
-    -Headers @{
-        "Authorization" = "Bearer $ADMIN_TOKEN"
-        "Content-Type" = "application/json"
-    } `
-    -Body (@(
-        @{
-            id = $MOVIES_USER_CLIENT_ROLE_ID
-            name = "MOVIES_USER"
-        }
-    ) | ConvertTo-Json)
+echo "Creating USERS group"
+echo "--------------------"
+USERS_GROUP_ID=$(curl -si -X POST "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/groups" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "USERS"}' \
+  | grep -oE '[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}')
 
-Write-Host "Papel 'MOVIES_USER' atribuído ao grupo 'USERS'."
+echo "USERS_GROUP_ID=$USERS_GROUP_ID"
+echo
 
-# Atribui os papéis "MOVIES_USER" e "MOVIES_ADMIN" ao grupo "ADMINS"
-Write-Host "Atribuindo os papéis 'MOVIES_USER' e 'MOVIES_ADMIN' ao grupo 'ADMINS'..."
-Invoke-RestMethod -Uri "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/groups/$ADMINS_GROUP_ID/role-mappings/clients/$CLIENT_ID" `
-    -Method Post `
-    -Headers @{
-        "Authorization" = "Bearer $ADMIN_TOKEN"
-        "Content-Type" = "application/json"
-    } `
-    -Body (@(
-        @{
-            id = $MOVIES_USER_CLIENT_ROLE_ID
-            name = "MOVIES_USER"
-        },
-        @{
-            id = $MOVIES_ADMIN_CLIENT_ROLE_ID
-            name = "MOVIES_ADMIN"
-        }
-    ) | ConvertTo-Json)
+echo "Creating ADMIN group"
+echo "--------------------"
+ADMINS_GROUP_ID=$(curl -si -X POST "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/groups" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "ADMINS"}' \
+  | grep -oE '[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}')
 
-Write-Host "Papéis atribuídos ao grupo 'ADMINS'."
+echo "ADMINS_GROUP_ID=$ADMINS_GROUP_ID"
+echo
 
-# Cria o usuário "user"
-Write-Host "Criando o usuário 'user'..."
-$USER_ID = (Invoke-RestMethod -Uri "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/users" `
-    -Method Post `
-    -Headers @{
-        "Authorization" = "Bearer $ADMIN_TOKEN"
-        "Content-Type" = "application/json"
-    } `
-    -Body (@{
-        username = "user"
-        enabled = $true
-        credentials = @(
-            @{
-                type = "password"
-                value = "user"
-                temporary = $false
-            }
-        )
-    } | ConvertTo-Json)).id
+echo "Adding USERS group as realm default group"
+echo "-----------------------------------------"
 
-if (-not $USER_ID) {
-    Write-Host "[ERRO] Falha ao criar o usuário 'user'."
-    exit 1
-}
-Write-Host "USER_ID=$USER_ID"
+curl -i -X PUT "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/default-groups/$USERS_GROUP_ID" \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
 
-# Atribui o grupo "USERS" ao usuário "user"
-Write-Host "Atribuindo o grupo 'USERS' ao usuário 'user'..."
-Invoke-RestMethod -Uri "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/users/$USER_ID/groups/$USERS_GROUP_ID" `
-    -Method Put `
-    -Headers @{"Authorization" = "Bearer $ADMIN_TOKEN"}
+echo "Assigning MOVIES_USER client role to USERS group"
+echo "------------------------------------------------"
 
-Write-Host "Grupo 'USERS' atribuído ao usuário 'user'."
+curl -i -X POST "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/groups/$USERS_GROUP_ID/role-mappings/clients/$CLIENT_ID" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "[{\"id\": \"$MOVIES_USER_CLIENT_ROLE_ID\", \"name\": \"MOVIES_USER\"}]"
 
-# Cria o usuário "admin"
-Write-Host "Criando o usuário 'admin'..."
-$ADMIN_ID = (Invoke-RestMethod -Uri "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/users" `
-    -Method Post `
-    -Headers @{
-        "Authorization" = "Bearer $ADMIN_TOKEN"
-        "Content-Type" = "application/json"
-    } `
-    -Body (@{
-        username = "admin"
-        enabled = $true
-        credentials = @(
-            @{
-                type = "password"
-                value = "admin"
-                temporary = $false
-            }
-        )
-    } | ConvertTo-Json)).id
+echo "Assigning MOVIES_USER and MOVIES_ADMIN client roles to ADMINS group"
+echo "-------------------------------------------------------------------"
 
-if (-not $ADMIN_ID) {
-    Write-Host "[ERRO] Falha ao criar o usuário 'admin'."
-    exit 1
-}
-Write-Host "ADMIN_ID=$ADMIN_ID"
+curl -i -X POST "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/groups/$ADMINS_GROUP_ID/role-mappings/clients/$CLIENT_ID" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "[{\"id\": \"$MOVIES_USER_CLIENT_ROLE_ID\", \"name\": \"MOVIES_USER\"}, {\"id\": \"$MOVIES_ADMIN_CLIENT_ROLE_ID\", \"name\": \"MOVIES_ADMIN\"}]"
 
-# Atribui o grupo "ADMINS" ao usuário "admin"
-Write-Host "Atribuindo o grupo 'ADMINS' ao usuário 'admin'..."
-Invoke-RestMethod -Uri "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/users/$ADMIN_ID/groups/$ADMINS_GROUP_ID" `
-    -Method Put `
-    -Headers @{"Authorization" = "Bearer $ADMIN_TOKEN"}
+echo "Creating 'user' user"
+echo "--------------------"
 
-Write-Host "Grupo 'ADMINS' atribuído ao usuário 'admin'."
+USER_ID=$(curl -si -X POST "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/users" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"username": "user", "enabled": true, "credentials": [{"type": "password", "value": "user", "temporary": false}]}' \
+  | grep -oE '[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}')
 
-# Obtém o token de acesso para o usuário "user"
-Write-Host "Obtendo token de acesso para o usuário 'user'..."
-$USER_TOKEN = (Invoke-RestMethod -Uri "http://$KEYCLOAK_HOST_PORT/realms/company-services/protocol/openid-connect/token" `
-    -Method Post `
-    -Headers @{"Content-Type" = "application/x-www-form-urlencoded"} `
-    -Body @{
-        username = "user"
-        password = "user"
-        grant_type = "password"
-        client_id = "movies-app"
-    }).access_token
+echo "USER_ID=$USER_ID"
+echo
 
-Write-Host "USER_TOKEN=$USER_TOKEN"
+echo "Assigning USERS group to user"
+echo "-----------------------------"
 
-# Obtém o token de acesso para o usuário "admin"
-Write-Host "Obtendo token de acesso para o usuário 'admin'..."
-$ADMIN_TOKEN = (Invoke-RestMethod -Uri "http://$KEYCLOAK_HOST_PORT/realms/company-services/protocol/openid-connect/token" `
-    -Method Post `
-    -Headers @{"Content-Type" = "application/x-www-form-urlencoded"} `
-    -Body @{
-        username = "admin"
-        password = "admin"
-        grant_type = "password"
-        client_id = "movies-app"
-    }).access_token
+curl -i -X PUT "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/users/$USER_ID/groups/$USERS_GROUP_ID" \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
 
-Write-Host "ADMIN_TOKEN=$ADMIN_TOKEN"
+echo "Creating 'admin' user"
+echo "---------------------"
 
-Write-Host "Configuração do Keycloak concluída com sucesso!"
+ADMIN_ID=$(curl -si -X POST "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/users" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"username": "admin", "enabled": true, "credentials": [{"type": "password", "value": "admin", "temporary": false}]}' \
+  | grep -oE '[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}')
+
+echo "ADMIN_ID=$ADMIN_ID"
+echo
+
+echo "Assigning ADMINS group to admin"
+echo "-------------------------------"
+
+curl -i -X PUT "http://$KEYCLOAK_HOST_PORT/admin/realms/company-services/users/$ADMIN_ID/groups/$ADMINS_GROUP_ID" \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+
+echo "Getting user access token"
+echo "-------------------------"
+
+curl -s -X POST "http://$KEYCLOAK_HOST_PORT/realms/company-services/protocol/openid-connect/token" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "username=user" \
+  -d "password=user" \
+  -d "grant_type=password" \
+  -d "client_id=movies-app" | jq -r .access_token
+echo
+
+echo "Getting admin access token"
+echo "--------------------------"
+
+curl -s -X POST "http://$KEYCLOAK_HOST_PORT/realms/company-services/protocol/openid-connect/token" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "username=admin" \
+  -d "password=admin" \
+  -d "grant_type=password" \
+  -d "client_id=movies-app" | jq -r .access_token
+echo
